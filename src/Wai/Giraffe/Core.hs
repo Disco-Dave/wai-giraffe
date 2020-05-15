@@ -1,49 +1,50 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 module Wai.Giraffe.Core
-  ( -- * HttpContext
-    HttpContext
-  , waiRequest
-  , setStatus
-  , addHeader
-  , addHeaders
-  , writeResponse
-  , writeText
+( -- * HttpContext
+  HttpContext
+, getData
+, setData
+, modifyData
+, waiRequest
+, setStatus
+, addHeader
+, addHeaders
+, writeResponse
 
-    -- * HttpHandler
-  , HttpFuncResult
-  , HttpFunc
-  , HttpHandler
+  -- * HttpHandler
+, HttpFuncResult
+, HttpFunc
 
-    -- * Combinators
-  , compose
-  , (>==>)
-  , choose
+  -- * Combinators
+, (>=>)
+, choose
 
-    -- * Routing
-  , httpMethod
-  , get
-  , post
-  , Wai.Giraffe.Core.head
-  , put
-  , delete
-  , trace
-  , connect
-  , options
-  , patch
-  , route
-  , header
-  , headerAndValue
+  -- * Routing
+, httpMethod
+, get
+, post
+, Wai.Giraffe.Core.head
+, put
+, delete
+, trace
+, connect
+, options
+, patch
+, route
+, header
+, headerAndValue
 
-   -- * Responses
-  , text
+ -- * Responses
+, text
 
-  -- * Application
-  , toApplication
-  )
+-- * Application
+, toApplication
+)
 where
 
 import           Control.Applicative            ( empty )
+import           Control.Monad                  ( (>=>) )
 import           Control.Monad.IO.Class         ( MonadIO(..) )
 import           Control.Monad.Trans.Maybe      ( MaybeT(..) )
 import           Data.Foldable                  ( asum , foldl')
@@ -57,46 +58,67 @@ import qualified Network.Wai                   as Wai
 
 
 
-data HttpContext = HttpContext
+data HttpContext a = HttpContext
   { httpRequest :: !Wai.Request
   , httpPathInfo :: ![Text]
   , httpSend :: !(Wai.Response -> IO Wai.ResponseReceived)
   , httpResponse :: !(Maybe Wai.ResponseReceived)
   , httpHeaders :: ![Http.Header]
   , httpStatus :: !(Maybe Http.Status)
+  , httpData :: !a
   }
 
-waiRequest :: HttpContext -> Wai.Request
+type HttpFuncResult a = MaybeT IO (HttpContext a)
+type HttpFunc a b = HttpContext a -> HttpFuncResult b
+
+instance Functor HttpContext where
+  fmap f ctx = ctx { httpData = f (httpData ctx) }
+
+getData :: HttpContext a -> a
+getData = httpData
+
+setData :: a -> HttpContext b -> HttpContext a
+setData = (<$)
+
+modifyData :: (a -> b) -> HttpContext a -> HttpContext b
+modifyData = fmap
+
+waiRequest :: HttpContext a -> Wai.Request
 waiRequest = httpRequest
 
 makeHttpContext
-  :: Wai.Request -> (Wai.Response -> IO Wai.ResponseReceived) -> HttpContext
-makeHttpContext request send = HttpContext
+  :: a
+  -> Wai.Request
+  -> (Wai.Response -> IO Wai.ResponseReceived)
+  -> HttpContext a
+makeHttpContext initialData request send = HttpContext
   { httpRequest  = request
   , httpPathInfo = Wai.pathInfo request
   , httpSend     = send
   , httpResponse = Nothing
   , httpHeaders  = []
   , httpStatus   = Nothing
+  , httpData     = initialData
   }
 
-setStatus :: Http.Status -> HttpContext -> HttpContext
+setStatus :: Http.Status -> HttpContext a -> HttpContext a
 setStatus status ctx = ctx { httpStatus = Just status }
 
-addHeader :: Http.Header -> HttpContext -> HttpContext
+addHeader :: Http.Header -> HttpContext a -> HttpContext a
 addHeader header ctx = ctx { httpHeaders = header : httpHeaders ctx }
 
-addHeaders :: Foldable t => t Http.Header -> HttpContext -> HttpContext
+addHeaders :: Foldable t => t Http.Header -> HttpContext a -> HttpContext a
 addHeaders headers ctx = ctx { httpHeaders = newHeaders }
   where newHeaders = foldl' (flip (:)) (httpHeaders ctx) headers
 
-writeResponse :: MonadIO m => Wai.Response -> HttpContext -> m HttpContext
+
+writeResponse :: Wai.Response -> HttpFunc a a
 writeResponse response ctx = do
   responseRecieved <- liftIO $ httpSend ctx response
   pure $ ctx { httpResponse = Just responseRecieved }
 
-writeText :: MonadIO m => Text -> HttpContext -> m HttpContext
-writeText textContent ctx =
+text :: Text -> HttpFunc a a
+text textContent ctx =
   let newCtx   = addHeader ("Content-Type", "text/plain; charset=UTF-8") ctx
       headers  = httpHeaders newCtx
       status   = fromMaybe Http.status200 (httpStatus newCtx)
@@ -106,90 +128,67 @@ writeText textContent ctx =
 
 
 
-type HttpFuncResult = MaybeT IO HttpContext
-type HttpFunc = HttpContext -> HttpFuncResult
-type HttpHandler = HttpFunc -> HttpFunc
 
 
 
-compose :: HttpHandler -> HttpHandler -> HttpHandler
-compose handler1 handler2 final =
-  let func = handler1 $ handler2 final
-  in  \ctx -> case httpResponse ctx of
-        Just _  -> final ctx
-        Nothing -> func ctx
-
-(>==>) :: HttpHandler -> HttpHandler -> HttpHandler
-(>==>) = compose
-infixr 1 >==>
-
-chooseHttpFunc :: [HttpFunc] -> HttpFunc
-chooseHttpFunc funcs ctx = asum $ fmap ($ ctx) funcs
-
-choose :: [HttpHandler] -> HttpHandler
-choose handlers next = chooseHttpFunc (fmap ($ next) handlers)
+choose :: [HttpFunc a b] -> HttpFunc a b
+choose funcs ctx = asum $ fmap ($ ctx) funcs
 
 
 
-httpMethod :: Http.Method -> HttpHandler
-httpMethod method next ctx | method == getMethod ctx = next ctx
-                           | otherwise               = empty
+
+httpMethod :: Http.Method -> HttpFunc a a
+httpMethod method ctx | method == getMethod ctx = pure ctx
+                      | otherwise               = empty
   where getMethod = Wai.requestMethod . waiRequest
 
-get :: HttpHandler
+
+get :: HttpFunc a a
 get = httpMethod Http.methodGet
 
-post :: HttpHandler
+post :: HttpFunc a a
 post = httpMethod Http.methodPost
 
-head :: HttpHandler
+head :: HttpFunc a a
 head = httpMethod Http.methodHead
 
-put :: HttpHandler
+put :: HttpFunc a a
 put = httpMethod Http.methodPut
 
-delete :: HttpHandler
+delete :: HttpFunc a a
 delete = httpMethod Http.methodDelete
 
-trace :: HttpHandler
+trace :: HttpFunc a a
 trace = httpMethod Http.methodTrace
 
-connect :: HttpHandler
+connect :: HttpFunc a a
 connect = httpMethod Http.methodConnect
 
-options :: HttpHandler
+options :: HttpFunc a a
 options = httpMethod Http.methodOptions
 
-patch :: HttpHandler
+patch :: HttpFunc a a
 patch = httpMethod Http.methodPatch
 
-route :: Text -> HttpHandler
-route part next ctx = case httpPathInfo ctx of
-  (p : parts) | p == part -> next (ctx { httpPathInfo = parts })
+route :: Text -> HttpFunc a a
+route part ctx = case httpPathInfo ctx of
+  (p : parts) | p == part -> pure $ ctx { httpPathInfo = parts }
   _                       -> empty
 
-header :: Http.HeaderName -> HttpHandler
-header headerName next ctx =
+header :: Http.HeaderName -> HttpFunc a a
+header headerName ctx =
   let headers = Wai.requestHeaders $ waiRequest ctx
-  in  if any ((== headerName) . fst) headers then next ctx else empty
+  in  if any ((== headerName) . fst) headers then pure ctx else empty
 
-headerAndValue :: Http.Header -> HttpHandler
-headerAndValue header next ctx =
+
+headerAndValue :: Http.Header -> HttpFunc a a
+headerAndValue header ctx =
   let headers = Wai.requestHeaders $ waiRequest ctx
-  in  if header `elem` headers then next ctx else empty
+  in  if header `elem` headers then pure ctx else empty
 
-
-
-text :: Text -> HttpHandler
-text textContent next ctx = do
-  newCtx <- writeText textContent ctx
-  next newCtx
-
-
-
-toApplication :: HttpHandler -> Wai.Application
-toApplication handler request send = do
-  let initialCtx = makeHttpContext request send
-      result     = handler pure initialCtx
+toApplication :: a -> HttpFunc a b -> Wai.Application
+toApplication initialData handler request send = do
+  let initialCtx = makeHttpContext initialData request send
+      result     = handler initialCtx
   response <- (>>= httpResponse) <$> runMaybeT result
   maybe (send $ Wai.responseLBS Http.status404 [] mempty) pure response

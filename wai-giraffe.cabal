@@ -4,7 +4,7 @@ cabal-version: 1.12
 --
 -- see: https://github.com/sol/hpack
 --
--- hash: 8802e1d7d0878aa90f78e79d93b2491d31e58305294a3013f86bc13fa6963999
+-- hash: 09f9351d293f807c82716696462708074059d95bd99044a6c5cb307937ce6623
 
 name:           wai-giraffe
 version:        0.1.0.0
@@ -27,7 +27,6 @@ source-repository head
 
 library
   exposed-modules:
-      Lib
       Wai.Giraffe.Core
   other-modules:
       Paths_wai_giraffe
